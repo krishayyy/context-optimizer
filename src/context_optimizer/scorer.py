@@ -47,6 +47,16 @@ from .parser import Chunk
 
 DEFAULT_HOOK_TIMEOUT_SECONDS = 8.0
 
+# Cap on how many characters of a chunk get embedded/reranked. Bounds worst-
+# case sequence length, which matters doubly for embedding: fastembed pads
+# every text in a batch to its longest member, so one long chunk inflates
+# its whole batch (see embeddings.py's length-sorted batching, the much
+# bigger lever for that). Measured on a real 1,136-chunk session, on top of
+# length-sorting: cap=2000 -> 16.3s, cap=500 -> 12.0s cold. 800 is a
+# middle ground -- most of that gain without truncating real content (like
+# a multi-hunk diff) down to near-nothing.
+EMBED_TEXT_CAP = 800
+
 
 def _run_with_timeout(fn, timeout_seconds: float | None):
     """Run fn() and return its result, or None if it doesn't finish within
@@ -296,7 +306,7 @@ class RelevanceScorer:
     def _semantic_relevance(chunks: list[Chunk], task_query: str) -> np.ndarray | None:
         if not task_query.strip():
             return None
-        texts = [c.text[:2000] for c in chunks]  # cap: embedding cost is O(text length)
+        texts = [c.text[:EMBED_TEXT_CAP] for c in chunks]
         chunk_vecs = embeddings.embed_many(texts)
         query_vec = embeddings.embed_many([task_query])
         if chunk_vecs is None or query_vec is None or len(query_vec) == 0:
@@ -322,7 +332,7 @@ class RelevanceScorer:
     def _rerank_relevance(chunks: list[Chunk], task_query: str) -> np.ndarray | None:
         if not task_query.strip():
             return None
-        texts = [c.text[:2000] for c in chunks]
+        texts = [c.text[:EMBED_TEXT_CAP] for c in chunks]
         scores = reranker.rerank_scores(task_query, texts)
         return scores
 

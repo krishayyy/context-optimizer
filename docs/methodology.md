@@ -155,6 +155,36 @@ invocation on timeout; `context-optimizer report` leaves it unbounded by
 default, since a user running it directly is asking for the full-quality
 result and is fine waiting.
 
+That timeout is a safety net, not a real fix -- it means the first hook
+trigger on a large session (exactly when the tool matters most) silently
+degrades to lexical-only. So the actual cold-start slowness was profiled
+properly (`cProfile` against a real cold cache, not the accidentally-warm
+profile from the first pass): **75.6 of 76.9 seconds was pure ONNX
+inference itself** (`onnxruntime...run`, 6 calls, ~12.6s each) -- not
+caching, not I/O, not JSON serialization, all of which were confirmed
+trivial (<0.2s combined). fastembed batches ~256 texts per call and pads
+every text in a batch to the length of its longest member. With a handful
+of long outlier chunks (real tool dumps near the embedding cap) scattered
+essentially at random across only 6 batches, those outliers were dragging
+their entire batch up to their own length.
+
+Fix, verified with a direct A/B test on the same real data before
+shipping it: sort texts by length before calling `model.embed()`, then
+scatter results back to the caller's original order (implemented in
+`embeddings.embed_many()`; correctness -- that results map back to the
+right text -- has a dedicated regression test in `test_embeddings.py`
+using a fake model that encodes each text's own length, so a reordering
+bug would be immediately caught). Measured on the real 1,136-chunk
+session: **71.4s -> 14.8s, a 4.8x speedup**, byte-identical output.
+Combined with also lowering the per-chunk embedding cap from 2000 to 800
+characters (a further 16.3s -> ~12s on top of sorting, chosen as a middle
+ground rather than exhaustively tuned), the full CLI path on that same
+real session went from **103s -> 15.4s** end to end. Still above the
+default 8s hook timeout on this particular large session, so the timeout
+fallback above remains a real, load-bearing safety net for sessions at or
+beyond this size -- not made redundant by this fix, just far less likely
+to trigger.
+
 ## Known limitations
 
 - Consecutive assistant-only tool calls with no intervening user message
