@@ -14,8 +14,8 @@ from __future__ import annotations
 from .. import project_context
 from ..digest import DEFAULT_WINDOW, build_digest
 from ..parser import parse_transcript
-from ..scorer import RelevanceScorer, build_task_query
-from .common import emit_json, get_env_int, read_hook_input
+from ..scorer import DEFAULT_HOOK_TIMEOUT_SECONDS, RelevanceScorer, build_task_query
+from .common import emit_json, get_env_float, get_env_int, read_hook_input
 
 
 def run() -> int:
@@ -40,7 +40,10 @@ def _run() -> int:
 
     proj = project_context.gather(cwd)
     task_query = build_task_query(chunks, extra_context=proj.branch_tokens_text())
-    scored = RelevanceScorer().score(chunks, task_query, modified_files=proj.modified_files)
+    timeout = get_env_float("CONTEXT_OPTIMIZER_HOOK_TIMEOUT", DEFAULT_HOOK_TIMEOUT_SECONDS)
+    scored = RelevanceScorer().score(
+        chunks, task_query, modified_files=proj.modified_files, timeout_seconds=timeout
+    )
     digest = build_digest(scored, window_size=window)
 
     if not digest.prune_candidates:

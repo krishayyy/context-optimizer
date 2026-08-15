@@ -37,12 +37,48 @@ instead of just asserting a number.
 from __future__ import annotations
 
 import re
+import threading
 from dataclasses import dataclass
 
 import numpy as np
 
 from . import embeddings, reranker
 from .parser import Chunk
+
+DEFAULT_HOOK_TIMEOUT_SECONDS = 8.0
+
+
+def _run_with_timeout(fn, timeout_seconds: float | None):
+    """Run fn() and return its result, or None if it doesn't finish within
+    timeout_seconds (None = no timeout, run inline).
+
+    Uses a plain daemon thread rather than concurrent.futures.ThreadPoolExecutor:
+    the executor's default shutdown behavior JOINS all pending work at
+    interpreter exit, which would silently defeat the whole point of a
+    timeout -- the process would hang waiting for the abandoned embedding
+    call anyway. A daemon thread never blocks process exit, so a timed-out
+    call is genuinely abandoned, not just deferred. Discovered empirically:
+    a real ~1100-chunk session's first (cold cache) embedding pass took
+    ~103s, and a hook that can silently block a prompt for 100+ seconds on
+    someone's first long session is not acceptable -- see
+    benchmarks/methodology in docs/methodology.md for the measurement.
+    """
+    if timeout_seconds is None:
+        return fn()
+    result: dict = {}
+
+    def target():
+        try:
+            result["value"] = fn()
+        except Exception:
+            result["value"] = None
+
+    t = threading.Thread(target=target, daemon=True)
+    t.start()
+    t.join(timeout_seconds)
+    if t.is_alive():
+        return None  # timed out; thread abandoned in the background, never awaited
+    return result.get("value")
 
 _TOKEN_RE = re.compile(r"[a-zA-Z0-9_]+")
 
@@ -125,13 +161,31 @@ class RelevanceScorer:
         chunks: list[Chunk],
         task_query: str,
         modified_files: set | None = None,
+        timeout_seconds: float | None = None,
     ) -> list[ScoredChunk]:
+        """timeout_seconds bounds the semantic/rerank signals only (the
+        lexical signal is pure numpy and always fast). None means no bound
+        -- appropriate for `context-optimizer report`, where a user asked
+        for the full-quality result and is fine waiting. Hooks should pass
+        a real bound (see DEFAULT_HOOK_TIMEOUT_SECONDS): a cold embedding
+        cache on a large real session was measured at ~103s, and a hook is
+        not allowed to block someone's prompt for that long -- on timeout,
+        scoring silently falls back to lexical-only for that invocation.
+        """
         if not chunks:
             return []
 
         lexical, coverage_debug = self._lexical_relevance(chunks, task_query)
-        semantic = self._semantic_relevance(chunks, task_query) if self.use_embeddings else None
-        rerank = self._rerank_relevance(chunks, task_query) if self.use_reranker else None
+        semantic = (
+            _run_with_timeout(lambda: self._semantic_relevance(chunks, task_query), timeout_seconds)
+            if self.use_embeddings
+            else None
+        )
+        rerank = (
+            _run_with_timeout(lambda: self._rerank_relevance(chunks, task_query), timeout_seconds)
+            if self.use_reranker
+            else None
+        )
 
         # Each signal is damped by a benchmark-calibrated weight before the
         # max-blend, not assumed to be an equal or dominant partner -- see

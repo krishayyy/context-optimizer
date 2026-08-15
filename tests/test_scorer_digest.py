@@ -1,6 +1,8 @@
+import time
+
 from context_optimizer.digest import build_digest
 from context_optimizer.parser import Chunk
-from context_optimizer.scorer import RelevanceScorer, build_task_query
+from context_optimizer.scorer import RelevanceScorer, _run_with_timeout, build_task_query
 
 
 def make_chunk(index, kind, text, tokens=None, **kwargs):
@@ -70,3 +72,44 @@ def test_empty_chunks_returns_empty_digest():
     digest = build_digest(scored, window_size=1000)
     assert digest.total_tokens == 0
     assert digest.prune_candidates == []
+
+
+def test_run_with_timeout_returns_none_and_does_not_block_on_slow_call():
+    def slow():
+        time.sleep(2)
+        return "should never see this"
+
+    t0 = time.time()
+    result = _run_with_timeout(slow, timeout_seconds=0.2)
+    elapsed = time.time() - t0
+
+    assert result is None
+    assert elapsed < 1.0  # must return promptly, not wait for the slow call
+
+
+def test_run_with_timeout_returns_result_when_fast_enough():
+    result = _run_with_timeout(lambda: "ok", timeout_seconds=5.0)
+    assert result == "ok"
+
+
+def test_score_falls_back_to_lexical_when_semantic_scoring_times_out():
+    """Real-world finding: a cold embedding cache on a large real session
+    measured ~103s for the first pass. score() must never let that block a
+    hook -- timeout_seconds must produce a valid (lexical-only) result
+    instead of hanging or raising.
+    """
+
+    class SlowScorer(RelevanceScorer):
+        @staticmethod
+        def _semantic_relevance(chunks, task_query):
+            time.sleep(2)
+            return None  # would never be reached under a real timeout
+
+    chunks = [make_chunk(0, "user_message", "add rate limiting to login")]
+
+    t0 = time.time()
+    scored = SlowScorer().score(chunks, "add rate limiting to login", timeout_seconds=0.2)
+    elapsed = time.time() - t0
+
+    assert elapsed < 1.0
+    assert len(scored) == 1

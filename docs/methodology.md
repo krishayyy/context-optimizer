@@ -119,6 +119,42 @@ default** (`RelevanceScorer(use_reranker=True)` to experiment) rather than
 claimed as a win it didn't earn. A different, larger, or code-tuned
 cross-encoder might do better — untested.
 
+## Tested against real sessions, not just synthetic scenarios
+
+The 5-scenario benchmark above is hand-built with engineered ground truth,
+which is good for catching specific regressions but small. To sanity-check
+against reality, the tool was also run directly against real, large,
+pre-existing Claude Code session transcripts already on disk (not
+committed anywhere — these are private project data) ranging up to 64MB /
+1,136 parsed chunks. It parsed and scored them without crashing and
+produced sensible output (correctly identified real stale `Bash` output,
+real resolved errors, real low-relevance tangents).
+
+It also surfaced a real problem no synthetic scenario could have: the
+**first** time the tool ever processes a given session's content, the
+embedding cache is cold and every chunk needs fresh inference. On the
+1,136-chunk real session, that first pass measured **~103 seconds**
+(331 CPU-seconds across threads — confirmed via `cProfile` and repeat
+runs that every subsequent pass on the same content took ~0.65s once
+cached). A hook that can silently block someone's prompt for 100+ seconds
+on their first long session is not acceptable, especially since the hook
+is *designed* to only start scoring once a session is already large (see
+the cheap pre-check in `hooks/user_prompt_submit.py`) — meaning the worst
+case lands exactly on the first real invocation that matters.
+
+Fix: `RelevanceScorer.score()` takes a `timeout_seconds` parameter that
+bounds the semantic/rerank signals (the lexical signal is pure numpy and
+always fast) using a daemon thread with `.join(timeout)`, not
+`concurrent.futures.ThreadPoolExecutor` — the executor's default shutdown
+behavior joins all pending work at interpreter exit, which would silently
+defeat the timeout by making the process hang anyway. A daemon thread
+never blocks process exit, so a timed-out call is genuinely abandoned.
+Hooks default to an 8-second bound (`CONTEXT_OPTIMIZER_HOOK_TIMEOUT` env
+var to change it) and fall back to lexical-only scoring for that
+invocation on timeout; `context-optimizer report` leaves it unbounded by
+default, since a user running it directly is asking for the full-quality
+result and is fine waiting.
+
 ## Known limitations
 
 - Consecutive assistant-only tool calls with no intervening user message
