@@ -12,7 +12,7 @@ you exactly what to drop — in your terminal, automatically, with zero
 config after install.
 
 ```bash
-git clone <this-repo> && cd context-optimizer
+git clone https://github.com/krishayyy/context-optimizer && cd context-optimizer
 pip install -e ".[tokenizer,semantic]"
 context-optimizer install
 ```
@@ -121,7 +121,7 @@ context-optimizer report path/to/session.jsonl --task "..."     # a specific one
 ## Development
 
 ```bash
-git clone <this repo> && cd context-optimizer
+git clone https://github.com/krishayyy/context-optimizer && cd context-optimizer
 pip install -e ".[dev,tokenizer,semantic]"
 pytest tests/ -q
 python benchmarks/run_benchmark.py   # rerun the ground-truth benchmark
