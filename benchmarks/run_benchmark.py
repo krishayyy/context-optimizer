@@ -80,13 +80,59 @@ def run_scenario(scenario: Scenario) -> dict:
     naive_prune = naive_oldest_first_prune(chunks, target_tokens)
     naive_precision, naive_recall, naive_f1 = _prf(naive_prune, scenario.should_prune, labeled_universe)
 
+    # Per-chunk correctness, for the pooled significance test in main(): a
+    # "correct" decision is a labeled chunk whose predicted prune/keep label
+    # matches its ground truth. This is a much larger sample (every labeled
+    # chunk across every scenario) than treating each scenario as one data
+    # point, which is the same pooling logic used to get a usable sample
+    # size for significance testing when the number of scenarios is small.
+    per_chunk = []
+    for uuid in labeled_universe:
+        truth_prune = uuid in scenario.should_prune
+        co_correct = (uuid in predicted_prune) == truth_prune
+        naive_correct = (uuid in naive_prune) == truth_prune
+        per_chunk.append((co_correct, naive_correct))
+
     return {
         "name": scenario.name,
         "n_chunks": len(chunks),
         "tokens_reclaimed": target_tokens,
         "co": (co_precision, co_recall, co_f1),
         "naive": (naive_precision, naive_recall, naive_f1),
+        "per_chunk": per_chunk,
     }
+
+
+def mcnemar_test(results: list[dict]) -> dict:
+    """Pooled McNemar's exact test on per-chunk correctness, CO vs naive.
+
+    McNemar's test is the standard paired test for two classifiers' binary
+    correct/incorrect decisions on the SAME items (unlike a t-test or
+    Wilcoxon on a continuous score, which don't apply to a binary outcome).
+    Only "discordant" pairs -- chunks where the two methods disagreed on
+    correctness -- carry information; concordant pairs (both right, or both
+    wrong) are uninformative for the comparison and dropped, per the test's
+    standard definition.
+    """
+    from scipy.stats import binomtest
+
+    b = 0  # CO correct, naive incorrect
+    c = 0  # CO incorrect, naive correct
+    n_total = 0
+    for r in results:
+        for co_correct, naive_correct in r["per_chunk"]:
+            n_total += 1
+            if co_correct and not naive_correct:
+                b += 1
+            elif naive_correct and not co_correct:
+                c += 1
+
+    discordant = b + c
+    if discordant == 0:
+        return {"n_total": n_total, "b": b, "c": c, "discordant": 0, "p_value": 1.0}
+
+    result = binomtest(b, discordant, 0.5, alternative="greater")
+    return {"n_total": n_total, "b": b, "c": c, "discordant": discordant, "p_value": result.pvalue}
 
 
 def main():
@@ -121,6 +167,13 @@ def main():
         f"\nMean F1 -- context-optimizer: {avg_co_f1:.2f}  |  naive oldest-first: {avg_naive_f1:.2f}"
     )
 
+    mcnemar = mcnemar_test(results)
+    console.print(
+        f"\nPooled per-chunk McNemar's test (n={mcnemar['n_total']} labeled chunks, "
+        f"{mcnemar['discordant']} discordant): CO correct-only={mcnemar['b']}, "
+        f"naive correct-only={mcnemar['c']}, one-sided p={mcnemar['p_value']:.4f}"
+    )
+
     out_path = Path(__file__).parent / "results.md"
     with out_path.open("w") as f:
         f.write("# context-optimizer benchmark results\n\n")
@@ -139,6 +192,12 @@ def main():
                 f"{co_p:.2f} | {co_r:.2f} | {co_f1:.2f} | {n_p:.2f} | {n_r:.2f} | {n_f1:.2f} |\n"
             )
         f.write(f"\n**Mean F1** -- context-optimizer: {avg_co_f1:.2f} | naive oldest-first: {avg_naive_f1:.2f}\n")
+        f.write(
+            f"\n**Pooled per-chunk McNemar's test** -- n={mcnemar['n_total']} labeled chunks "
+            f"pooled across all scenarios, {mcnemar['discordant']} discordant pairs "
+            f"(CO correct only: {mcnemar['b']}, naive correct only: {mcnemar['c']}), "
+            f"one-sided exact binomial p={mcnemar['p_value']:.4f}\n"
+        )
     console.print(f"\nWrote {out_path}")
 
 

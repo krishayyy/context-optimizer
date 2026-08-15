@@ -11,3 +11,5 @@ Synthetic scenarios with engineered ground truth (see `scenarios.py`). Both stra
 | paraphrase | 8 | 24 | 1.00 | 0.50 | 0.67 | 0.00 | 0.00 | 0.00 |
 
 **Mean F1** -- context-optimizer: 0.90 | naive oldest-first: 0.61
+
+**Pooled per-chunk McNemar's test** -- n=45 labeled chunks pooled across all scenarios, 10 discordant pairs (CO correct only: 10, naive correct only: 0), one-sided exact binomial p=0.0010
